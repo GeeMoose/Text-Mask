@@ -1,0 +1,5 @@
+venv
+fonts
+*.py[cod]
+
+__pycache__

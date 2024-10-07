@@ -1,14 +1,30 @@
 import streamlit as st
-from PIL import Image
+import requests
+from PIL import Image, ImageDraw, ImageFont
 import io
-import numpy as np
+import json
+import sseclient
 
-def adjust_image(image, brightness, contrast):
-    img_array = np.array(image).astype(float)
-    adjusted = img_array * brightness
-    adjusted = np.clip(adjusted, 0, 255)
-    adjusted = (adjusted - 128) * contrast + 128
-    return Image.fromarray(np.clip(adjusted, 0, 255).astype(np.uint8))
+def add_text_to_image(image, text, font_size, text_color):
+    draw = ImageDraw.Draw(image)
+    try:
+        font = ImageFont.truetype(font="./fonts/ABeeZee_italic_400.ttf", size=font_size)
+    except IOError:
+        print("font not found")
+        # 如果默认字体不可用，使用默认位图字体
+        font = ImageFont.load_default()
+    # 使用font.getbbox()方法获取文本边界框
+    bbox = font.getbbox(text)
+    text_width = bbox[2] - bbox[0]
+    text_height = bbox[3] - bbox[1]
+    # 计算文字在图片中心正上方的位置
+    x = (image.width - text_width) / 2
+    y = 10
+
+    position = (x, y)
+
+    draw.text(position, text, font=font, fill=text_color)
+    return image
 
 def main():
     st.set_page_config(layout="wide")
@@ -17,11 +33,63 @@ def main():
     uploaded_file = st.file_uploader("Uploading a Image", type=["jpg", "jpeg", "png"])
     
     if uploaded_file is not None:
+        file_name = uploaded_file.name
+        headers = {
+        'accept': 'application/json',
+        'Authorization': 'Bearer 1234'
+        }
+        files = {'file': (file_name, uploaded_file.getvalue(), uploaded_file.type)}
+        response = requests.post(
+            f'https://a1d-rb.k-xshar.workers.dev/api/uploads/{file_name}', headers=headers, files=files)
         # 创建两列布局，图片占60%，编辑器占40%
         col1, col2 = st.columns([6, 4], gap="small")
         
         # 加载原始图片
         image = Image.open(uploaded_file)
+        # 生成和处理前景图
+        fore_headers = {
+             "Content-Type": "application/json",
+             'accept': 'application/json',
+             'Authorization': 'Bearer 1234'
+        }
+        res = requests.post(f'https://a1d-rb.k-xshar.workers.dev/api/task', headers=fore_headers, json={"image_url": response.json().get('url')})
+        id = res.json().get('id')
+        try:
+            response = requests.get(f'https://a1d-rb.k-xshar.workers.dev/api/task/{id}/sse', headers={
+            "Accept": "text/event-stream",
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive"
+            }, stream=True)
+            try:
+                client = sseclient.SSEClient(response)
+            except Exception as e:
+                print(f"Create SSEClient error: {str(e)}")
+                client = None
+            
+            fore_image_url = None
+            fore_image = None
+            for event in client.events():
+                if event.data:
+                    try:
+                        data = json.loads(event.data)
+                        if data.get('status') == 'FINISHED':
+                            fore_image_url = data.get('image_url')
+                            break
+
+                    except json.JSONDecodeError:
+                        print("error")  
+                else:
+                    print("error")
+            
+            # 将URL转换为streamlit.Image可读取的文件形式
+            if fore_image_url:
+                response = requests.get(fore_image_url)
+                if response.status_code == 200:
+                    image_bytes = response.content
+                    fore_image = Image.open(io.BytesIO(image_bytes))
+
+        except:
+            print("error")
         
         # 应用编辑并显示图片在左侧列
         with col1:
@@ -52,14 +120,32 @@ def main():
                 
                 # 在列中添加编辑器控件
                 with col:
-                    # 调整亮度
-                    brightness = st.slider("亮度", 0.0, 2.0, 1.0, step=0.1)
+                    text_input = st.text_input("Text")
+                    font_size = st.slider("Font Size", 10, 100, 70)
+                    text_color = st.color_picker("Text Color", "#000000")
+                    if text_input:
+                        edited_image = add_text_to_image(image, text_input, font_size, text_color)
+                        # Load fore image
+                        if fore_image:
+                            # 将前景图调整为与编辑后图像相同的大小
+                            fore_image = fore_image.resize(edited_image.size, Image.LANCZOS)
+                            
+                            # 确保编辑后的图像为RGBA模式
+                            edited_image = edited_image.convert('RGBA')
+                            
+                            # 创建一个与编辑后图像相同大小的透明图层
+                            overlay = Image.new('RGBA', edited_image.size, (255, 255, 255, 0))
+                            
+                            # 将前景图粘贴到透明图层上
+                            overlay.paste(fore_image, (0, 0), fore_image)
+                        
+                            # 将透明图层与编辑后的图像合成
+                            edited_image = Image.alpha_composite(edited_image, overlay)
+                    else:
+                        edited_image = image
                     
-                    # 调整对比度
-                    contrast = st.slider("对比度", 0.5, 1.5, 1.0, step=0.1)
+                    img_display.image(edited_image, use_column_width=True)
                     
-                    # 下载编辑后的图片
-                    edited_image = adjust_image(image, brightness, contrast)
                     buf = io.BytesIO()
                     edited_image.save(buf, format="PNG")
                     st.download_button(
